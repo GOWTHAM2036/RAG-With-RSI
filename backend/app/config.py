@@ -1,10 +1,12 @@
 """
-Configuration management for EvoRAG backend with automatic Local LLM auto-detection.
+Configuration management for EvoRAG backend with automatic Local LLM auto-detection
+and token pricing / compute cost accounting.
 """
 import os
 import httpx
 from pathlib import Path
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 from typing import Tuple, List
 
 def auto_detect_local_llm() -> Tuple[str, str, List[str]]:
@@ -40,7 +42,7 @@ def auto_detect_local_llm() -> Tuple[str, str, List[str]]:
             r = httpx.get(f"{url}/api/tags", timeout=1.0)
             if r.status_code == 200:
                 models = [m["name"] for m in r.json().get("models", [])]
-                default_m = models[0] if models else "llama3"
+                default_m = models[0] if models else "gemma3:4b"
                 return url, default_m, models
         except Exception:
             pass
@@ -61,8 +63,10 @@ def auto_detect_local_llm() -> Tuple[str, str, List[str]]:
 _detected_url, _detected_model, _available_models = auto_detect_local_llm()
 
 class Settings(BaseSettings):
-    APP_NAME: str = "EvoRAG - Evolutionary RAG System"
-    VERSION: str = "1.0.0"
+    model_config = ConfigDict(env_file=".env", extra="allow")
+
+    APP_NAME: str = "RAG-With-RSI: Evolutionary & Self-Improving Architecture"
+    VERSION: str = "1.1.0"
     DEBUG: bool = False
     
     # Base paths
@@ -71,7 +75,7 @@ class Settings(BaseSettings):
     EXPERIMENTS_DIR: Path = BASE_DIR / "experiments"
     STORAGE_DIR: Path = DATA_DIR / "storage"
     
-    # Provider API keys (optional, fallback to local/mock if not provided)
+    # Provider API keys
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     COHERE_API_KEY: str = os.getenv("COHERE_API_KEY", "")
@@ -82,14 +86,15 @@ class Settings(BaseSettings):
     LOCAL_LLM_URL: str = os.getenv("LOCAL_LLM_URL", _detected_url)
     LOCAL_LLM_MODEL: str = os.getenv("LOCAL_LLM_MODEL", _detected_model)
     AVAILABLE_LOCAL_MODELS: List[str] = _available_models
-    
+
+    # Cost accounting: USD per 1M tokens (Standard baseline pricing / compute proxy)
+    PRICE_EMBEDDING_PER_1M_TOKENS: float = 0.020    # $0.02 per 1M tokens
+    PRICE_INPUT_PER_1M_TOKENS: float = 0.150        # $0.15 per 1M prompt tokens (e.g. gpt-4o-mini / local compute unit)
+    PRICE_OUTPUT_PER_1M_TOKENS: float = 0.600       # $0.60 per 1M completion tokens
+
     # Server host and port
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    
-    class Config:
-        env_file = ".env"
-        extra = "allow"
 
 settings = Settings()
 

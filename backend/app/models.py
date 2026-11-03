@@ -1,5 +1,7 @@
 """
-Data models and schemas for EvoRAG.
+Data models and schemas for EvoRAG and RAG-With-RSI.
+Includes explicit multi-objective Pareto dimensions (accuracy, latency, cost),
+dataset isolation splits, and comprehensive claim verification metrics.
 """
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
@@ -48,6 +50,15 @@ class RAGStrategy(BaseModel):
     generation: int = 0  # Genetic algorithm generation
     fitness: Optional[float] = None
     latency_ms: Optional[float] = None
+
+    # Explicit Pareto Multi-Objective Attributes
+    measured_accuracy: Optional[float] = None       # Composite benchmark accuracy (0.0 - 1.0) [Maximize]
+    measured_latency_ms: Optional[float] = None     # Measured End-to-End latency in ms [Minimize]
+    measured_cost_usd: Optional[float] = None       # Real measured API/compute token cost in USD [Minimize]
+    measured_tokens: Optional[int] = None           # Total prompt + completion + embedding tokens
+    retrieval_latency_ms: Optional[float] = None    # Isolated retrieval latency
+    generation_latency_ms: Optional[float] = None   # Isolated generation latency
+
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class QueryRequest(BaseModel):
@@ -64,9 +75,11 @@ class QueryResponse(BaseModel):
     citations: List[Dict[str, Any]] = Field(default_factory=list)
     strategy_used: RAGStrategy
     latency_ms: float = 0.0
+    retrieval_latency_ms: float = 0.0
+    generation_latency_ms: float = 0.0
     agent_steps: Optional[List[Dict[str, Any]]] = None
     faithfulness_score: Optional[float] = None
-    evaluation: Optional[Dict[str, float]] = None
+    evaluation: Optional[Dict[str, Any]] = None
     llm_debug_info: Optional[Dict[str, Any]] = None
 
 class BenchmarkPair(BaseModel):
@@ -81,6 +94,7 @@ class BenchmarkDataset(BaseModel):
     name: str = "Standard QA Benchmark"
     description: str = ""
     pairs: List[BenchmarkPair] = Field(default_factory=list)
+    fingerprint: Optional[str] = None  # SHA256 checksum for audit & reproducibility
 
 class RetrievalMetrics(BaseModel):
     hit_rate: float = 0.0
@@ -90,10 +104,14 @@ class RetrievalMetrics(BaseModel):
     ndcg: float = 0.0
 
 class AnswerMetrics(BaseModel):
-    faithfulness: float = 0.0
-    answer_relevance: float = 0.0
-    semantic_similarity: float = 0.0
-    hallucination_rate: float = 0.0
+    faithfulness: float = 0.0                   # Claim-level support faithfulness
+    claim_faithfulness: float = 0.0             # Explicit ratio of verified claims
+    token_overlap_faithfulness: float = 0.0     # Legacy token overlap proxy
+    answer_relevance: float = 0.0               # Intent & semantic alignment
+    semantic_similarity: float = 0.0            # Sentence embedding cosine similarity
+    token_f1: float = 0.0                       # Token F1 score against ground truth
+    hallucination_rate: float = 0.0             # Derived from unsupported factual claims
+    evaluation_notes: str = ""
 
 class EvaluationReport(BaseModel):
     strategy_id: str
@@ -102,7 +120,16 @@ class EvaluationReport(BaseModel):
     answer_metrics: AnswerMetrics
     composite_fitness: float
     avg_latency_ms: float
-    total_queries: int
+    retrieval_latency_ms: float = 0.0
+    generation_latency_ms: float = 0.0
+    total_latency_ms: float = 0.0
+    measured_cost_usd: float = 0.0
+    total_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    embedding_tokens: int = 0
+    total_queries: int = 0
+    dataset_fingerprint: str = ""
     failure_analysis: Dict[str, Any] = Field(default_factory=dict)
 
 class ExperimentConfig(BaseModel):
@@ -112,7 +139,19 @@ class ExperimentConfig(BaseModel):
     mutation_rate: float = 0.25
     crossover_rate: float = 0.7
     elite_ratio: float = 0.25
+    random_seed: int = 42
+    generator_provider: str = "heuristic"       # heuristic, local (ollama), openai
+    eval_sample_limit: Optional[int] = None     # Subsampling limit for fast evolution
     benchmark_dataset_id: Optional[str] = None
+    train_split: str = "train"                  # Train/Experimentation split
+    val_split: str = "validation"               # Cross-generation validation split
+    test_split: str = "test_isolated"           # Strictly isolated test split (evaluated once on champion)
+    pareto_objectives: List[str] = Field(default_factory=lambda: ["accuracy", "latency", "cost"])
+    objective_directions: Dict[str, str] = Field(default_factory=lambda: {
+        "accuracy": "max",
+        "latency": "min",
+        "cost": "min"
+    })
     weight_faithfulness: float = 0.35
     weight_relevance: float = 0.25
     weight_hit_rate: float = 0.20
@@ -133,7 +172,11 @@ class OptimizationRunSummary(BaseModel):
     status: str  # running, completed, failed
     generations_completed: int
     total_generations: int
+    random_seed: int = 42
+    dataset_fingerprint: str = ""
     champion_strategy: RAGStrategy
+    validation_champion: Optional[RAGStrategy] = None
+    test_evaluation: Optional[EvaluationReport] = None
     generation_history: List[GenerationStats]
     pareto_frontier: List[RAGStrategy]
     start_time: float

@@ -1,6 +1,7 @@
 """
-EvoRAG FastAPI Main Application.
-Provides RESTful APIs for Document Ingestion, Retrieval, Evaluation, Optimization, and Agentic RAG.
+RAG-With-RSI FastAPI Main Application.
+Provides RESTful APIs for Document Ingestion, Hybrid Retrieval, Claim-Level Evaluation,
+Pareto Multi-Objective Optimization, and Self-Reflective Agentic RAG.
 """
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,17 +32,26 @@ from backend.app.retrieval.hybrid_retriever import HybridRetriever
 from backend.app.reranking.factory import RerankerFactory
 from backend.app.generation.llm_providers import GeneratorFactory
 from backend.app.evaluation.benchmarks import BenchmarkRunner
+from backend.app.evaluation.answer_eval import AnswerEvaluator
 from backend.app.optimizer.strategy_generator import StrategyGenerator
 from backend.app.optimizer.experiment_runner import EvolutionaryExperimentRunner
 from backend.app.optimizer.selector import StrategySelector
 from backend.app.agents.rag_graph import RAGAgentGraph
 from backend.app.memory.session_memory import SessionMemoryManager
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    load_default_knowledge_and_benchmarks()
+    yield
+
 # Initialize FastAPI App
 app = FastAPI(
-    title="EvoRAG - Evolutionary & Self-Optimizing RAG API",
-    description="Adaptive, Self-Optimizing Retrieval-Augmented Generation Engine with Genetic Algorithm Tuning.",
-    version="1.0.0"
+    title="RAG-With-RSI - Evolutionary & Self-Improving RAG API",
+    description="Adaptive, Self-Optimizing Retrieval-Augmented Generation Engine with Genetic Algorithm Tuning & Claim-Level Evaluation.",
+    version="1.1.0",
+    lifespan=lifespan
 )
 
 # CORS middleware for local frontend dev
@@ -84,7 +94,7 @@ class SystemState:
 
 state = SystemState()
 
-# Preload built-in sample data and benchmark on startup
+# Preload built-in sample data on startup
 def load_default_knowledge_and_benchmarks():
     sample_dir = settings.DATA_DIR / "sample_docs"
     if sample_dir.exists():
@@ -97,10 +107,6 @@ def load_default_knowledge_and_benchmarks():
                 pass
         state.reindex()
 
-@app.on_event("startup")
-def startup_event():
-    load_default_knowledge_and_benchmarks()
-
 # ----------------- System & Health Endpoints -----------------
 
 @app.get("/")
@@ -108,49 +114,79 @@ def read_root():
     return {
         "app": settings.APP_NAME,
         "version": settings.VERSION,
-        "docs_url": "/docs",
-        "status": "online"
+        "status": "online",
+        "local_llm": {
+            "endpoint": settings.LOCAL_LLM_URL,
+            "default_model": settings.LOCAL_LLM_MODEL,
+            "detected_models": settings.AVAILABLE_LOCAL_MODELS
+        },
+        "documents_count": len(state.documents),
+        "chunks_indexed": len(state.chunks),
+        "active_champion": state.champion_strategy.name
     }
 
 @app.get("/api/status")
 def get_system_status():
     return {
-        "status": "healthy",
+        "status": "online",
+        "app": settings.APP_NAME,
+        "version": settings.VERSION,
         "documents_count": len(state.documents),
         "chunks_count": len(state.chunks),
-        "champion_strategy": state.champion_strategy,
-        "retrieval_strategy": state.champion_strategy.retrieval_strategy,
-        "active_runs_count": len(state.active_runs)
+        "champion_strategy": state.champion_strategy
     }
 
-@app.get("/api/llm/status")
-def get_llm_status():
-    from backend.app.config import auto_detect_local_llm
-    url, def_m, avail_m = auto_detect_local_llm()
+# ----------------- Document Ingestion Endpoints -----------------
+
+@app.post("/api/ingest/text")
+def ingest_raw_text(payload: Dict[str, Any]):
+    text = payload.get("text", "")
+    title = payload.get("title", "Raw Text Ingestion")
+    metadata = payload.get("metadata", {})
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+
+    doc = DocumentLoader.load_from_text(text=text, title=title, metadata=metadata)
+    state.documents.append(doc)
+    state.reindex()
+
     return {
-        "status": "online" if avail_m else "offline",
-        "url": url,
-        "active_model": settings.LOCAL_LLM_MODEL,
-        "available_models": avail_m,
-        "provider": "ollama" if ("11550" in url or "11434" in url) else "local"
+        "message": f"Successfully ingested text document '{doc.title}'.",
+        "document_id": doc.id,
+        "total_documents": len(state.documents),
+        "chunks_indexed": len(state.chunks)
     }
 
-@app.post("/api/ingest/samples")
-def ingest_samples():
-    sample_dir = settings.DATA_DIR / "sample_docs"
-    loaded = 0
-    if sample_dir.exists():
-        for f in sample_dir.glob("*.md"):
+@app.post("/api/ingest/file")
+async def ingest_uploaded_file(file: UploadFile = File(...)):
+    save_path = settings.DATA_DIR / file.filename
+    try:
+        with open(save_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        doc = DocumentLoader.load_from_file(save_path)
+        state.documents.append(doc)
+        state.reindex()
+
+        return {
+            "message": f"Successfully ingested file '{file.filename}'.",
+            "document_id": doc.id,
+            "total_documents": len(state.documents),
+            "chunks_indexed": len(state.chunks)
+        }
+    finally:
+        if save_path.exists():
             try:
-                doc = DocumentLoader.load_from_file(f)
-                if not any(d.title == doc.title for d in state.documents):
-                    state.documents.append(doc)
-                    loaded += 1
+                os.remove(save_path)
             except Exception:
                 pass
-    state.reindex()
+
+@app.post("/api/ingest/samples")
+def ingest_sample_documents():
+    load_default_knowledge_and_benchmarks()
     return {
-        "message": f"Successfully ingested {loaded} sample documents.",
+        "message": f"Loaded {len(state.documents)} sample knowledge documents.",
         "documents_count": len(state.documents),
         "chunks_count": len(state.chunks)
     }
@@ -189,53 +225,16 @@ def ingest_rsi_dataset(payload: Optional[Dict[str, Any]] = None):
         "chunks_count": len(state.chunks)
     }
 
-# ----------------- Document Ingestion Endpoints -----------------
-
-@app.post("/api/ingest/text", response_model=Document)
-def ingest_text(payload: Dict[str, Any]):
-    text = payload.get("text", "")
-    title = payload.get("title", "Direct Text Input")
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="Text content cannot be empty.")
-
-    doc = DocumentLoader.load_from_text(text=text, title=title)
-    state.documents.append(doc)
-    state.reindex()
-    return doc
-
-@app.post("/api/ingest/file")
-async def ingest_file(file: UploadFile = File(...)):
-    dest_path = settings.STORAGE_DIR / file.filename
-    with open(dest_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    doc = DocumentLoader.load_from_file(dest_path)
-    state.documents.append(doc)
-    state.reindex()
-    return {
-        "message": f"Successfully ingested '{file.filename}'",
-        "document_id": doc.id,
-        "chunks_generated": len(state.chunks),
-        "word_count": doc.metadata.get("word_count", 0)
-    }
-
-@app.get("/api/documents")
+@app.get("/api/documents", response_model=List[Document])
 def list_documents():
-    return [
-        {
-            "id": d.id,
-            "title": d.title,
-            "char_count": d.metadata.get("char_count", len(d.content)),
-            "word_count": d.metadata.get("word_count", len(d.content.split())),
-            "created_at": d.created_at,
-            "source": d.metadata.get("source", "user_input")
-        }
-        for d in state.documents
-    ]
+    return state.documents
 
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: str):
+    initial_count = len(state.documents)
     state.documents = [d for d in state.documents if d.id != doc_id]
+    if len(state.documents) == initial_count:
+        raise HTTPException(status_code=404, detail="Document not found.")
     state.reindex()
     return {"message": f"Document {doc_id} deleted and index refreshed."}
 
@@ -255,7 +254,6 @@ def query_rag(request: QueryRequest):
 
     if request.use_agent:
         response = state.agent_graph.run(request.query, strategy=strat, documents=state.documents)
-        # Store in session memory if requested
         if request.session_id:
             session = state.memory_manager.get_session(request.session_id)
             session.add_user_message(request.query)
@@ -263,21 +261,23 @@ def query_rag(request: QueryRequest):
         return response
 
     # Standard RAG Execution
-    # 1. Retrieve
+    # 1. Retrieve & Rerank (Isolated timing)
+    t_ret_start = time.time()
     raw_retrieved = state.retriever.retrieve(
         query=request.query,
         top_k=strat.top_k,
         filter_metadata=request.filter_metadata
     )
 
-    # 2. Rerank
     if strat.reranker_enabled and raw_retrieved:
         reranker = RerankerFactory.get_reranker(strat.reranker_type)
         final_retrieved = reranker.rerank(request.query, raw_retrieved, top_n=strat.rerank_top_n)
     else:
         final_retrieved = raw_retrieved[:strat.top_k]
+    retrieval_latency_ms = round((time.time() - t_ret_start) * 1000.0, 2)
 
-    # 3. Generate
+    # 2. Generate (Isolated timing)
+    t_gen_start = time.time()
     generator = GeneratorFactory.get_generator(getattr(strat, "llm_provider", "local"))
     answer, citations = generator.generate(
         query=request.query,
@@ -286,8 +286,12 @@ def query_rag(request: QueryRequest):
         temperature=strat.temperature,
         max_tokens=strat.max_tokens
     )
+    generation_latency_ms = round((time.time() - t_gen_start) * 1000.0, 2)
+    total_latency_ms = round((time.time() - t0) * 1000.0, 2)
 
-    latency_ms = (time.time() - t0) * 1000.0
+    # 3. Claim-Level Faithfulness Verification
+    claim_verification = AnswerEvaluator.compute_claim_faithfulness(answer, final_retrieved)
+    faithfulness_score = claim_verification["claim_faithfulness"]
 
     response = QueryResponse(
         query=request.query,
@@ -295,7 +299,15 @@ def query_rag(request: QueryRequest):
         retrieved_chunks=final_retrieved,
         citations=citations,
         strategy_used=strat,
-        latency_ms=round(latency_ms, 2),
+        latency_ms=total_latency_ms,
+        retrieval_latency_ms=retrieval_latency_ms,
+        generation_latency_ms=generation_latency_ms,
+        faithfulness_score=faithfulness_score,
+        evaluation={
+            "faithfulness": faithfulness_score,
+            "claim_verification": claim_verification,
+            "chunks_used": len(final_retrieved)
+        },
         llm_debug_info=getattr(generator, "last_debug_info", None)
     )
 
@@ -323,35 +335,50 @@ def evaluate_strategy(payload: Dict[str, Any]):
     strategy_data = payload.get("strategy")
     strat = RAGStrategy(**strategy_data) if strategy_data else state.champion_strategy
 
-    if not state.documents:
-        raise HTTPException(status_code=400, detail="Cannot run benchmark without ingested documents.")
+    split_name = payload.get("split", "validation")
+    sample_limit = payload.get("sample_limit", 15)
 
     benchmark_data = payload.get("benchmark")
     if benchmark_data:
         benchmark = BenchmarkDataset(**benchmark_data)
+        docs = state.documents
     else:
-        # Generate default benchmark from ingested documents
-        benchmark = get_builtin_benchmark()
+        benchmark, docs = BenchmarkRunner.load_rsi_split(split_name, sample_limit=sample_limit)
+        if not docs and state.documents:
+            docs = state.documents
+
+    if not docs and not state.documents:
+        raise HTTPException(status_code=400, detail="Cannot run benchmark without ingested documents or RSI splits.")
 
     report = BenchmarkRunner.run_strategy_benchmark(
         strategy=strat,
-        documents=state.documents,
-        benchmark=benchmark
+        documents=docs if docs else state.documents,
+        benchmark=benchmark,
+        generator_provider=payload.get("generator_provider")
     )
     return report
+
+@app.get("/api/benchmarks/splits")
+def get_dataset_splits():
+    splits = {}
+    for split_name in ["train", "validation", "test_isolated", "test_blind"]:
+        bench, docs = BenchmarkRunner.load_rsi_split(split_name, sample_limit=50)
+        splits[split_name] = {
+            "queries_count": len(bench.pairs),
+            "documents_count": len(docs),
+            "fingerprint": bench.fingerprint or "n/a",
+            "description": bench.description
+        }
+    return splits
 
 # ----------------- Evolutionary Optimization Endpoints -----------------
 
 @app.post("/api/optimizer/run", response_model=OptimizationRunSummary)
 def run_optimization(config: ExperimentConfig):
-    if not state.documents:
-        raise HTTPException(status_code=400, detail="Ingest at least one document before launching optimization.")
-
-    benchmark = get_builtin_benchmark()
     runner = EvolutionaryExperimentRunner(config=config)
-    summary = runner.run_evolution(documents=state.documents, benchmark=benchmark)
+    summary = runner.run_evolution(documents=state.documents)
 
-    # Automatically set newly discovered champion as active champion
+    # Set validated champion as active pipeline
     state.champion_strategy = summary.champion_strategy
     state.reindex()
     state.active_runs[summary.id] = summary
@@ -368,11 +395,14 @@ def set_champion(strategy: RAGStrategy):
     state.reindex()
     return state.champion_strategy
 
+@app.get("/api/optimizer/champions")
+def list_registered_champions():
+    return EvolutionaryExperimentRunner.load_champions_registry()
+
 @app.get("/api/optimizer/runs")
 def list_optimization_runs():
     runs = []
-    # Read from storage dir
-    for f in settings.EXPERIMENTS_DIR.glob("*.json"):
+    for f in settings.EXPERIMENTS_DIR.glob("exp-*.json"):
         try:
             with open(f, "r", encoding="utf-8") as json_f:
                 runs.append(json.load(json_f))
@@ -388,36 +418,5 @@ def get_run_details(run_id: str):
     with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-# Helper function for benchmark dataset
 def get_builtin_benchmark() -> BenchmarkDataset:
-    benchmark_file = settings.BASE_DIR.parent / "benchmarks" / "general_qa.json"
-    if benchmark_file.exists():
-        with open(benchmark_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return BenchmarkDataset(**data)
-
-    # Synthetic fallback benchmark
-    return BenchmarkDataset(
-        name="Adaptive RAG Core Benchmark",
-        description="Comprehensive evaluation testbed across core factual recall and cross-chunk synthesis.",
-        pairs=[
-            BenchmarkPair(
-                query="What is Retrieval-Augmented Generation?",
-                ground_truth_contexts=["Retrieval-Augmented Generation blends neural generation with dense/sparse document retrieval."],
-                ground_truth_answer="Retrieval-Augmented Generation (RAG) is an AI architecture that enhances language models by retrieving relevant external knowledge chunks.",
-                category="definition"
-            ),
-            BenchmarkPair(
-                query="Why is Reciprocal Rank Fusion useful in hybrid search?",
-                ground_truth_contexts=["Reciprocal Rank Fusion (RRF) normalizes disparate score distributions between vector and lexical retrievers."],
-                ground_truth_answer="RRF combines sparse BM25 and dense vector rankings seamlessly without requiring manual score calibration.",
-                category="mechanism"
-            ),
-            BenchmarkPair(
-                query="How does evolutionary optimization improve RAG pipelines?",
-                ground_truth_contexts=["Evolutionary algorithms optimize hyperparameter combinations such as chunk size, overlap, top-k, and hybrid alpha."],
-                ground_truth_answer="Evolutionary algorithms iteratively mutate and select the best RAG hyperparameters against benchmark fitness metrics.",
-                category="optimization"
-            )
-        ]
-    )
+    return BenchmarkRunner.get_builtin_benchmark()

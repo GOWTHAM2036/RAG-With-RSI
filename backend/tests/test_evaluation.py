@@ -1,5 +1,9 @@
 """
-Unit tests for evaluation metrics (retrieval and answer evaluation).
+Unit tests for evaluation metrics:
+- Retrieval metrics (Hit rate, MRR, Precision, Recall, NDCG)
+- Claim-Level Faithfulness & Hallucination detection
+- Negation and Entity-Binding verification
+- Semantic similarity and Token F1
 """
 import pytest
 from backend.app.models import Chunk, RetrievedChunk
@@ -41,3 +45,25 @@ def test_answer_evaluation(retrieved_data):
 
     similarity = AnswerEvaluator.compute_semantic_similarity(answer, gt_answer)
     assert similarity > 0.2
+
+def test_claim_level_unsupported_detection(retrieved_data):
+    # Completely unsupported statement
+    hallucinated_answer = "Photosynthesis produces rocket fuel on Mars."
+    claim_res = AnswerEvaluator.compute_claim_faithfulness(hallucinated_answer, retrieved_data)
+    assert claim_res["claim_faithfulness"] == 0.0
+    assert len(claim_res["unsupported_claims"]) > 0
+
+    metrics = AnswerEvaluator.evaluate_answer(
+        query="What does photosynthesis produce?",
+        answer=hallucinated_answer,
+        context_chunks=retrieved_data
+    )
+    assert metrics.claim_faithfulness == 0.0
+    assert metrics.hallucination_rate == 1.0
+
+def test_negation_contradiction_detection(retrieved_data):
+    # Context says: Photosynthesis converts sunlight, water, and carbon dioxide into glucose and oxygen.
+    # Negated claim contradicts context:
+    contradictory_answer = "Photosynthesis does not convert sunlight into glucose."
+    claim_res = AnswerEvaluator.compute_claim_faithfulness(contradictory_answer, retrieved_data)
+    assert claim_res["claim_faithfulness"] < 1.0
