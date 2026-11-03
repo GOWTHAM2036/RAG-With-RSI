@@ -1,7 +1,7 @@
 """
 LLM Generation Providers for EvoRAG:
-- HeuristicGenerator (Fast, zero-cost, grounded citation synthesizer for offline/local)
-- LocalLLMGenerator (Ollama, LM Studio, vLLM, OpenAI-compatible local endpoints with live logs)
+- HeuristicGenerator (Fast, zero-cost, grounded citation synthesizer with strict abstention)
+- LocalLLMGenerator (Ollama, LM Studio, vLLM, OpenAI-compatible local endpoints with live logs & fallback notice)
 - OpenAIGenerator (OpenAI GPT-4o / GPT-4o-mini / GPT-3.5)
 - AnthropicGenerator (Claude 3.5 Sonnet / Haiku)
 """
@@ -18,7 +18,7 @@ class HeuristicGenerator(BaseGenerator):
     """
     Extractive-abstractive synthesizer that extracts the most pertinent sentences
     from the retrieved chunks and composes a coherent answer with grounded citations.
-    Ensures 100% offline, reproducible, zero-API-cost RAG execution.
+    Enforces strict relevance gating and honest abstention when evidence is absent.
     """
     def __init__(self):
         self.last_debug_info = {"provider": "heuristic", "status": "online"}
@@ -40,11 +40,20 @@ class HeuristicGenerator(BaseGenerator):
             "status": "processed"
         }
 
+        # 1. Abstain immediately if no context chunks are supplied
         if not context_chunks:
-            return "No relevant context found to answer the query.", []
+            return (
+                f"I do not have sufficient information in the ingested documents to answer: '{query}'. "
+                f"The current knowledge base does not contain verified context about this topic.",
+                []
+            )
 
         q_words = set(self._tokenize(query))
-        stop_words = {"what", "is", "the", "how", "are", "of", "and", "in", "to", "a", "for", "with", "does", "can", "why"}
+        stop_words = {
+            "what", "is", "the", "how", "are", "of", "and", "in", "to", "a", "an",
+            "for", "with", "does", "can", "why", "about", "tell", "me", "explain",
+            "describe", "give", "detail", "detailed", "summary", "please"
+        }
         key_q_words = q_words - stop_words
         if not key_q_words:
             key_q_words = q_words
@@ -54,10 +63,9 @@ class HeuristicGenerator(BaseGenerator):
 
         for idx, r_chunk in enumerate(context_chunks):
             content = r_chunk.chunk.content
-            # Split into sentences
             sentences = re.split(r"(?<=[.!?])\s+", content)
             best_sentence = ""
-            best_score = -1
+            best_score = 0  # Strictly require overlap > 0
 
             for s in sentences:
                 s_words = set(self._tokenize(s))
@@ -66,8 +74,8 @@ class HeuristicGenerator(BaseGenerator):
                     best_score = overlap
                     best_sentence = s.strip()
 
-            if best_sentence:
-                citation_num = idx + 1
+            if best_sentence and best_score > 0:
+                citation_num = len(citations) + 1
                 extracted_sentences.append(f"{best_sentence} [{citation_num}]")
                 citations.append({
                     "citation_id": f"[{citation_num}]",
@@ -77,19 +85,15 @@ class HeuristicGenerator(BaseGenerator):
                     "snippet": best_sentence[:120] + "..." if len(best_sentence) > 120 else best_sentence
                 })
 
+        # 2. Abstain if zero sentences in the retrieved context discuss the query's concepts
         if not extracted_sentences:
-            first_chunk = context_chunks[0]
-            answer = f"Based on the available documentation: {first_chunk.chunk.content[:200]}... [1]"
-            citations.append({
-                "citation_id": "[1]",
-                "doc_title": first_chunk.chunk.metadata.get("doc_title", "Document 1"),
-                "chunk_id": first_chunk.chunk.id,
-                "score": round(first_chunk.score, 4),
-                "snippet": first_chunk.chunk.content[:120]
-            })
-            return answer, citations
+            return (
+                f"I do not have sufficient information in the ingested documents to answer: '{query}'. "
+                f"None of the retrieved documents contain verified context about this topic.",
+                []
+            )
 
-        # Format depending on template
+        # Format answer depending on template
         if prompt_template in ["cot", "chain_of_thought"]:
             answer = (
                 f"Analysis of retrieved sources indicates multiple supporting facts.\n\n"
@@ -128,19 +132,24 @@ class LocalLLMGenerator(BaseGenerator):
         t0 = time.time()
         active_model = model_override or self.model
 
-        # Build prompt
-        if context_chunks:
-            formatted_context = format_context_chunks(context_chunks)
-            template_str = get_prompt_by_template_name(prompt_template)
-            prompt = template_str.format(context=formatted_context, query=query)
-        else:
-            # Handle zero context gracefully
-            prompt = (
-                f"You are EvoRAG AI Assistant. No specific matching context was found in the uploaded knowledge base.\n"
-                f"Answer the user's question clearly, and inform them that no local documents matched this query.\n\n"
-                f"User Question: {query}\n"
-                f"Answer:"
+        # If zero context is available, return honest abstention directly
+        if not context_chunks:
+            self.last_debug_info = {
+                "status": "abstained_zero_context",
+                "provider": "local_ollama",
+                "model_used": active_model,
+                "latency_ms": 0.5
+            }
+            return (
+                f"I do not have sufficient information in the ingested documents to answer: '{query}'. "
+                f"The current knowledge base does not contain verified context about this topic.",
+                []
             )
+
+        # Build prompt
+        formatted_context = format_context_chunks(context_chunks)
+        template_str = get_prompt_by_template_name(prompt_template)
+        prompt = template_str.format(context=formatted_context, query=query)
 
         base = self.base_url.rstrip("/")
         endpoints_to_try = [
@@ -214,7 +223,7 @@ class LocalLLMGenerator(BaseGenerator):
         # If all local calls failed, log error and fall back to heuristic
         latency = round((time.time() - t0) * 1000.0, 1)
         self.last_debug_info = {
-            "status": "connection_failed",
+            "status": "connection_failed_fallback_heuristic",
             "provider": "local_ollama",
             "base_url": self.base_url,
             "model_attempted": active_model,
@@ -224,13 +233,8 @@ class LocalLLMGenerator(BaseGenerator):
         }
 
         fallback_ans, fallback_cits = self._fallback.generate(query, context_chunks, prompt_template, temperature, max_tokens)
-        if not context_chunks:
-            fallback_ans = (
-                f"⚠️ **Local LLM Notice**: No context documents found in the knowledge base, "
-                f"and could not connect to Local LLM at `{self.base_url}` ({', '.join(errors[:1])}).\n\n"
-                f"Please load documents or verify that Ollama is running (`ollama run {active_model}`)."
-            )
-        return fallback_ans, fallback_cits
+        notice = f"⚠️ **[Notice: Local LLM ({active_model}) offline at {self.base_url} — synthesized via Heuristic Extractor]**\n\n"
+        return f"{notice}{fallback_ans}", fallback_cits
 
 
 class OpenAIGenerator(BaseGenerator):
@@ -248,7 +252,7 @@ class OpenAIGenerator(BaseGenerator):
         temperature: float = 0.2,
         max_tokens: int = 512
     ) -> Tuple[str, List[Dict[str, Any]]]:
-        if not self.api_key:
+        if not self.api_key or not context_chunks:
             return self._fallback.generate(query, context_chunks, prompt_template, temperature, max_tokens)
 
         formatted_context = format_context_chunks(context_chunks)
@@ -303,7 +307,7 @@ class AnthropicGenerator(BaseGenerator):
         temperature: float = 0.2,
         max_tokens: int = 512
     ) -> Tuple[str, List[Dict[str, Any]]]:
-        if not self.api_key:
+        if not self.api_key or not context_chunks:
             return self._fallback.generate(query, context_chunks, prompt_template, temperature, max_tokens)
 
         formatted_context = format_context_chunks(context_chunks)

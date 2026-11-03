@@ -1,5 +1,8 @@
 """
-Unit tests for RAGAgentGraph and state machine transitions.
+Unit tests for RAGAgentGraph and state machine transitions:
+- Intent routing
+- Knowledge retrieval & grounded generation
+- Relevance gate & honest abstention on unsupported topics
 """
 import pytest
 from backend.app.models import Document, Chunk, RAGStrategy
@@ -34,3 +37,24 @@ def test_agent_graph_execution():
     assert "DocumentGrader" in nodes
     assert "GroundedGenerator" in nodes
     assert "SelfCorrectionGuard" in nodes
+
+def test_relevance_gate_abstention_on_unrelated_query():
+    # Only genetic algorithms in knowledge base
+    chunks = [
+        Chunk(
+            doc_id="doc1",
+            content="Genetic algorithms optimize hyperparameters using mutation and crossover."
+        )
+    ]
+    retriever = HybridRetriever(alpha=0.6)
+    retriever.index_chunks(chunks)
+
+    strategy = RAGStrategy(name="Test Strategy", top_k=3, reranker_enabled=False)
+    graph = RAGAgentGraph(retriever, default_strategy=strategy)
+
+    # Ask unrelated topic: Quantum computing
+    res = graph.run("Explain quantum computing in detail.")
+    assert "sufficient information" in res.answer.lower()
+    assert len(res.citations) == 0
+    assert len(res.retrieved_chunks) == 0
+    assert any(step["node"] == "RelevanceGate" for step in res.agent_steps)

@@ -1,17 +1,19 @@
 """
 Agentic RAG State Machine & Self-Corrective Graph.
 Implements:
+- Strict Retrieval Relevance Gate: Filters out unrelated chunks before they reach generation.
+- Grounded Abstention: Explicitly abstains when evidence is missing, never fabricating or quoting random documents.
 - Verified Query Reformulation: Only adopts fallback queries if they verifiably improve retrieval score.
 - Bounded retry limits to eliminate infinite or futile loops.
 - Claim-Level Faithfulness Verification with entity co-occurrence and negation checks.
 - Granular latency decomposition (retrieval vs generation vs total).
-- Transparent execution diagnostics and provider trace logs.
 """
 from typing import List, Dict, Any, Optional
 import time
 import re
 from backend.app.models import RAGStrategy, RetrievedChunk, QueryResponse, Document
 from backend.app.retrieval.hybrid_retriever import HybridRetriever
+from backend.app.retrieval.relevance_gate import RelevanceGate
 from backend.app.reranking.factory import RerankerFactory
 from backend.app.generation.llm_providers import GeneratorFactory
 from backend.app.evaluation.answer_eval import AnswerEvaluator
@@ -68,30 +70,51 @@ class RAGAgentGraph:
             t_ret_start = time.time()
             self._retrieve_and_rerank(state)
 
-            # Node 3: Grade Documents
+            # Node 3: Grade Documents with Strict Relevance Gate
             self._grade_documents(state)
 
-            # Node 4: Verified Query Transformation Fallback if initial retrieval confidence is insufficient
-            if (len(state.graded_chunks) == 0 or max([c.score for c in state.retrieved_chunks], default=0.0) < 0.25) and state.retry_count < state.max_retries:
+            # Node 4: Verified Query Transformation Fallback if initial retrieval relevance is zero
+            if len(state.graded_chunks) == 0 and state.retry_count < state.max_retries:
                 state.retry_count += 1
                 self._execute_verified_fallback(state)
 
             state.retrieval_latency_ms = round((time.time() - t_ret_start) * 1000.0, 2)
 
-            # Node 5: Grounded Answer Generation (Isolated timing)
-            t_gen_start = time.time()
-            self._generate_answer(state)
-            state.generation_latency_ms = round((time.time() - t_gen_start) * 1000.0, 2)
+            # Node 5: Context Validation & Honest Abstention Check
+            if len(state.graded_chunks) == 0:
+                # Abstain immediately: do NOT pass unrelated chunks to the generator
+                state.generated_answer = (
+                    f"I do not have sufficient information in the ingested documents to answer: '{query}'. "
+                    f"The current knowledge base does not contain verified context about this topic."
+                )
+                state.retrieved_chunks = []
+                state.citations = []
+                state.faithfulness_score = 1.0  # Honest abstention makes zero ungrounded assertions
+                state.claim_verification_details = {
+                    "status": "abstained_insufficient_evidence",
+                    "reason": "Zero retrieved chunks met relevance criteria",
+                    "searched_terms": list(RelevanceGate.extract_key_query_terms(state.original_query))
+                }
+                state.log_step(
+                    "RelevanceGate",
+                    f"Abstained from generation: zero chunks relevant to '{state.original_query}'.",
+                    {"action": "abstained", "chunks_passed": 0}
+                )
+            else:
+                # Node 6: Grounded Answer Generation (Isolated timing)
+                t_gen_start = time.time()
+                self._generate_answer(state)
+                state.generation_latency_ms = round((time.time() - t_gen_start) * 1000.0, 2)
 
-            # Node 6: Self-Correction & Claim-Level Faithfulness Verification
-            self._verify_and_self_correct(state)
+                # Node 7: Self-Correction & Claim-Level Faithfulness Verification
+                self._verify_and_self_correct(state)
 
         total_latency = (time.time() - t0) * 1000.0
 
         return QueryResponse(
             query=query,
             answer=state.generated_answer,
-            retrieved_chunks=state.graded_chunks if state.graded_chunks else state.retrieved_chunks,
+            retrieved_chunks=state.graded_chunks,
             citations=state.citations,
             strategy_used=state.strategy,
             latency_ms=round(total_latency, 2),
@@ -103,7 +126,7 @@ class RAGAgentGraph:
             evaluation={
                 "faithfulness": round(state.faithfulness_score, 4),
                 "claim_verification": state.claim_verification_details,
-                "chunks_used": len(state.graded_chunks) if state.graded_chunks else len(state.retrieved_chunks)
+                "chunks_used": len(state.graded_chunks)
             }
         )
 
@@ -176,36 +199,16 @@ class RAGAgentGraph:
             state.retrieved_chunks = raw_chunks[:strat.top_k]
 
     def _grade_documents(self, state: RAGAgentState):
-        """Filters retrieved chunks to keep only those with tangible lexical/semantic relevance."""
-        q_tokens = set(re.findall(r"\b\w+\b", state.transformed_query.lower()))
-        stop_words = {"what", "is", "the", "a", "an", "and", "or", "in", "to", "for", "of", "with"}
-        key_tokens = q_tokens - stop_words
-        if not key_tokens:
-            key_tokens = q_tokens
-
-        graded = []
-        for rc in state.retrieved_chunks:
-            c_tokens = set(re.findall(r"\b\w+\b", rc.chunk.content.lower()))
-            overlap = len(key_tokens.intersection(c_tokens))
-            if overlap > 0 or rc.score >= 0.2:
-                graded.append(rc)
-
-        state.graded_chunks = graded
+        """Strictly filters retrieved chunks through the Relevance Gate."""
+        passed, rejected = RelevanceGate.filter_relevant_chunks(state.transformed_query, state.retrieved_chunks)
+        state.graded_chunks = passed
         state.log_step(
             "DocumentGrader",
-            f"Graded documents: {len(graded)}/{len(state.retrieved_chunks)} chunks deemed relevant.",
-            {"passed": len(graded), "dropped": len(state.retrieved_chunks) - len(graded)}
+            f"Graded documents: {len(passed)}/{len(state.retrieved_chunks)} chunks deemed relevant to '{state.transformed_query}'.",
+            {"passed": len(passed), "dropped": len(rejected)}
         )
 
     def _reformulate_query(self, query: str) -> str:
-        """
-        Intelligently reformulates query:
-        - Extracts key noun phrases and entities.
-        - Strips interrogative stopwords.
-        - Converts conversational phrasing to declarative search tokens.
-        - Does NOT append generic filler words like 'summary overview'.
-        """
-        # Strip interrogatives
         cleaned = re.sub(
             r"\b(can you|could you|please|what is|how do|why does|tell me about|explain the)\b",
             "",
@@ -225,10 +228,6 @@ class RAGAgentGraph:
         return query.strip()
 
     def _execute_verified_fallback(self, state: RAGAgentState):
-        """
-        Executes query transformation fallback and strictly verifies whether the new query
-        improves retrieval confidence before adopting it.
-        """
         previous_chunks = list(state.retrieved_chunks)
         previous_top_score = max([c.score for c in previous_chunks], default=0.0)
 
@@ -241,7 +240,6 @@ class RAGAgentGraph:
             {"previous_top_score": round(previous_top_score, 4), "reformulated_query": reformulated}
         )
 
-        # Retrieve candidates with reformulated query
         strat = state.strategy
         new_raw_chunks = self.retriever.retrieve(reformulated, top_k=strat.top_k)
 
@@ -251,37 +249,31 @@ class RAGAgentGraph:
         else:
             new_retrieved = new_raw_chunks[:strat.top_k]
 
-        new_top_score = max([c.score for c in new_retrieved], default=0.0)
+        passed, rejected = RelevanceGate.filter_relevant_chunks(reformulated, new_retrieved)
+        new_top_score = max([c.score for c in passed], default=0.0) if passed else 0.0
 
-        # Grade new candidates
-        q_tokens = set(re.findall(r"\b\w+\b", reformulated.lower()))
-        new_graded = [
-            rc for rc in new_retrieved
-            if (len(q_tokens.intersection(set(re.findall(r"\b\w+\b", rc.chunk.content.lower())))) > 0 or rc.score >= 0.2)
-        ]
-
-        # Verify whether rewrite genuinely improved retrieval
-        if new_top_score > previous_top_score and len(new_graded) > 0:
+        if len(passed) > 0 and new_top_score > previous_top_score:
             state.retrieved_chunks = new_retrieved
-            state.graded_chunks = new_graded
+            state.graded_chunks = passed
             state.log_step(
                 "FallbackVerifier",
-                f"Verification Passed: Rewrite improved retrieval score ({new_top_score:.3f} > {previous_top_score:.3f}).",
+                f"Verification Passed: Rewrite found {len(passed)} relevant chunks (score {new_top_score:.3f}).",
                 {"action": "adopted_reformulation", "new_top_score": round(new_top_score, 4)}
             )
         else:
-            # Fallback failed to improve retrieval: retain original chunks and bound retry loop
             state.retrieved_chunks = previous_chunks
+            state.graded_chunks = []
             state.log_step(
                 "FallbackVerifier",
-                f"Verification Halted: Rewrite did not improve score ({new_top_score:.3f} <= {previous_top_score:.3f}). Retained original chunks.",
-                {"action": "reverted_to_original", "previous_top_score": round(previous_top_score, 4)}
+                f"Verification Halted: Fallback found 0 relevant chunks. Halting retry loop to enforce honest abstention.",
+                {"action": "reverted_and_abstained"}
             )
 
     def _generate_answer(self, state: RAGAgentState):
-        chunks_to_use = state.graded_chunks if state.graded_chunks else state.retrieved_chunks
+        chunks_to_use = state.graded_chunks
         provider = getattr(state.strategy, "llm_provider", "local")
-        generator = GeneratorFactory.get_generator(provider)
+        model = state.strategy.metadata.get("local_model") if state.strategy.metadata else None
+        generator = GeneratorFactory.get_generator(provider, model=model)
 
         answer, citations = generator.generate(
             query=state.original_query,
@@ -301,32 +293,29 @@ class RAGAgentGraph:
         )
 
     def _verify_and_self_correct(self, state: RAGAgentState):
-        chunks_to_use = state.graded_chunks if state.graded_chunks else state.retrieved_chunks
+        chunks_to_use = state.graded_chunks
         if not chunks_to_use:
-            state.faithfulness_score = 0.0
-            state.claim_verification_details = {"claims_evaluated": 0, "status": "no_context"}
             return
 
-        # Run Claim-Level Support Verification
         verification = AnswerEvaluator.compute_claim_faithfulness(state.generated_answer, chunks_to_use)
         faithfulness = verification["claim_faithfulness"]
         state.faithfulness_score = faithfulness
         state.claim_verification_details = verification
 
         if faithfulness < 0.4 and chunks_to_use:
-            # Self-correction: replace unverified answer with strictly cited ground quote
-            first = chunks_to_use[0]
-            corrected = f"According to verified context: {first.chunk.content[:220]}... [1]"
-            state.generated_answer = corrected
-            state.is_faithful = True
-            state.faithfulness_score = 1.0
+            state.generated_answer = (
+                f"I cannot provide a sufficiently grounded answer based on the retrieved context. "
+                f"The available documentation does not adequately verify claims regarding '{state.original_query}'."
+            )
+            state.is_faithful = False
+            state.faithfulness_score = round(faithfulness, 4)
             state.log_step(
                 "SelfCorrectionGuard",
-                "Detected unsupported propositions; self-corrected answer to strict factual quote.",
+                "Detected ungrounded propositions; refused hallucination and flagged low factual grounding.",
                 {
                     "original_faithfulness": round(faithfulness, 4),
                     "unsupported_claims": verification.get("unsupported_claims", []),
-                    "action": "strict_quote_enforced"
+                    "action": "refused_hallucination"
                 }
             )
         else:

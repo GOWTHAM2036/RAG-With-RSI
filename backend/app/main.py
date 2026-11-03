@@ -29,6 +29,7 @@ from backend.app.ingestion.loader import DocumentLoader
 from backend.app.chunking.factory import ChunkerFactory
 from backend.app.embeddings.factory import EmbeddingFactory
 from backend.app.retrieval.hybrid_retriever import HybridRetriever
+from backend.app.retrieval.relevance_gate import RelevanceGate
 from backend.app.reranking.factory import RerankerFactory
 from backend.app.generation.llm_providers import GeneratorFactory
 from backend.app.evaluation.benchmarks import BenchmarkRunner
@@ -276,12 +277,43 @@ def query_rag(request: QueryRequest):
         final_retrieved = raw_retrieved[:strat.top_k]
     retrieval_latency_ms = round((time.time() - t_ret_start) * 1000.0, 2)
 
-    # 2. Generate (Isolated timing)
+    # 2. Strict Retrieval Relevance Gate
+    passed, rejected = RelevanceGate.filter_relevant_chunks(request.query, final_retrieved)
+    if not passed:
+        answer = (
+            f"I do not have sufficient information in the ingested documents to answer: '{request.query}'. "
+            f"The current knowledge base does not contain verified context about this topic."
+        )
+        total_latency_ms = round((time.time() - t0) * 1000.0, 2)
+        response = QueryResponse(
+            query=request.query,
+            answer=answer,
+            retrieved_chunks=[],
+            citations=[],
+            strategy_used=strat,
+            latency_ms=total_latency_ms,
+            retrieval_latency_ms=retrieval_latency_ms,
+            generation_latency_ms=0.0,
+            faithfulness_score=1.0,
+            evaluation={
+                "status": "abstained_insufficient_evidence",
+                "reason": "Zero retrieved chunks passed relevance gate",
+                "chunks_used": 0
+            }
+        )
+        if request.session_id:
+            session = state.memory_manager.get_session(request.session_id)
+            session.add_user_message(request.query)
+            session.add_assistant_message(response.answer, response.citations)
+        return response
+
+    # 3. Generate (Only with validated relevant chunks)
     t_gen_start = time.time()
-    generator = GeneratorFactory.get_generator(getattr(strat, "llm_provider", "local"))
+    model = strat.metadata.get("local_model") if strat.metadata else None
+    generator = GeneratorFactory.get_generator(getattr(strat, "llm_provider", "local"), model=model)
     answer, citations = generator.generate(
         query=request.query,
-        context_chunks=final_retrieved,
+        context_chunks=passed,
         prompt_template=strat.prompt_template,
         temperature=strat.temperature,
         max_tokens=strat.max_tokens
@@ -289,14 +321,14 @@ def query_rag(request: QueryRequest):
     generation_latency_ms = round((time.time() - t_gen_start) * 1000.0, 2)
     total_latency_ms = round((time.time() - t0) * 1000.0, 2)
 
-    # 3. Claim-Level Faithfulness Verification
-    claim_verification = AnswerEvaluator.compute_claim_faithfulness(answer, final_retrieved)
+    # 4. Claim-Level Faithfulness Verification
+    claim_verification = AnswerEvaluator.compute_claim_faithfulness(answer, passed)
     faithfulness_score = claim_verification["claim_faithfulness"]
 
     response = QueryResponse(
         query=request.query,
         answer=answer,
-        retrieved_chunks=final_retrieved,
+        retrieved_chunks=passed,
         citations=citations,
         strategy_used=strat,
         latency_ms=total_latency_ms,
@@ -306,7 +338,7 @@ def query_rag(request: QueryRequest):
         evaluation={
             "faithfulness": faithfulness_score,
             "claim_verification": claim_verification,
-            "chunks_used": len(final_retrieved)
+            "chunks_used": len(passed)
         },
         llm_debug_info=getattr(generator, "last_debug_info", None)
     )

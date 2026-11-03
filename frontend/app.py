@@ -192,6 +192,10 @@ with tab_chat:
 
         session_id = st.text_input("Session ID", value="default_user")
 
+        if st.button("🧹 Clear Chat History", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
+
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
@@ -203,6 +207,11 @@ with tab_chat:
                     for c in msg["citations"]:
                         st.markdown(f"**{c['citation_id']} {c['doc_title']}** (Score: {c.get('score', 0):.2f})")
                         st.caption(c.get("snippet", ""))
+            if msg.get("chunks"):
+                with st.expander("🔍 Retrieved Context Chunks"):
+                    for idx, rc in enumerate(msg["chunks"]):
+                        st.markdown(f"**Chunk #{idx+1}** | Score: `{rc.get('score', 0):.3f}` | Source: `{rc.get('retrieval_source', 'hybrid')}`")
+                        st.caption(rc.get("chunk", {}).get("content", "")[:300] + "...")
             if msg.get("evaluation"):
                 with st.expander("🔍 Factual Groundedness & Claim Verification"):
                     ev = msg["evaluation"]
@@ -210,10 +219,12 @@ with tab_chat:
                     cv = ev.get("claim_verification", {})
                     if cv.get("unsupported_claims"):
                         st.warning(f"Unsupported Propositions Detected: {cv['unsupported_claims']}")
+                    elif cv.get("status") == "abstained_insufficient_evidence":
+                        st.info("🛡️ Honest Abstention: Groundedness verified (no unsupported claims made).")
                     else:
                         st.success("All extracted factual propositions are supported by retrieved context.")
             if msg.get("llm_debug_info"):
-                with st.expander("🖥️ Local LLM Execution Logs & Trace"):
+                with st.expander("🖥️ Execution Logs & Engine Trace"):
                     st.json(msg["llm_debug_info"])
 
     query_input = st.chat_input("Ask a question about your ingested documents...")
@@ -224,12 +235,17 @@ with tab_chat:
             st.markdown(query_input)
 
         with st.chat_message("assistant"):
-            with st.spinner("Retrieving and synthesizing with Local LLM..."):
+            with st.spinner("Retrieving and synthesizing with LLM..."):
                 try:
+                    active_strategy = status_data.get("champion_strategy", {}).copy() if status_data else {}
+                    active_strategy["llm_provider"] = selected_llm
+                    active_strategy["metadata"] = {"local_model": local_model_choice}
+
                     payload = {
                         "query": query_input,
                         "session_id": session_id,
                         "use_agent": use_agent,
+                        "strategy": active_strategy
                     }
                     endpoint = f"{API_BASE}/api/agent/query" if use_agent else f"{API_BASE}/api/query"
                     res = requests.post(endpoint, json=payload, timeout=60)
@@ -237,6 +253,7 @@ with tab_chat:
                         data = res.json()
                         answer = data.get("answer", "")
                         citations = data.get("citations", [])
+                        chunks = data.get("retrieved_chunks", [])
                         tot_lat = data.get("latency_ms", 0)
                         ret_lat = data.get("retrieval_latency_ms", 0)
                         gen_lat = data.get("generation_latency_ms", 0)
@@ -250,20 +267,32 @@ with tab_chat:
                             f"🎯 **Claim Faithfulness:** {faithfulness * 100:.1f}%"
                         )
 
+                        if llm_debug and "fallback" in str(llm_debug.get("status", "")).lower():
+                            st.warning(f"⚠️ **Local LLM Notice**: Ollama was offline or failed to respond. Fallback to Heuristic engine occurred. Trace: `{llm_debug.get('errors')}`")
+
                         if citations:
                             with st.expander(f"📚 View Citations ({len(citations)})"):
                                 for c in citations:
                                     st.markdown(f"**{c['citation_id']} {c['doc_title']}** (Relevance: {c.get('score', 0):.2f})")
                                     st.caption(c.get("snippet", ""))
 
+                        if chunks:
+                            with st.expander(f"🔍 Retrieved Context Chunks ({len(chunks)})"):
+                                for idx, rc in enumerate(chunks):
+                                    st.markdown(f"**Chunk #{idx+1}** | Score: `{rc.get('score', 0):.3f}` | Source: `{rc.get('retrieval_source', 'hybrid')}`")
+                                    st.caption(rc.get("chunk", {}).get("content", "")[:300] + "...")
+                        elif "insufficient" in answer.lower():
+                            st.info("🛡️ **Relevance Gate Triggered**: Zero chunks passed relevance criteria. System abstained from ungrounded generation.")
+
                         if llm_debug:
-                            with st.expander("🖥️ Local LLM Execution Logs"):
+                            with st.expander("🖥️ Engine Execution Logs"):
                                 st.json(llm_debug)
 
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": answer,
                             "citations": citations,
+                            "chunks": chunks,
                             "llm_debug_info": llm_debug,
                             "evaluation": eval_info
                         })
