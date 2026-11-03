@@ -1,0 +1,50 @@
+# Dataset configuration for RSI-RAG (Recursive Self-Improving RAG)
+# Automated Download, Preprocessing, Validation & Evaluation Preparation
+
+datasets:
+  hotpotqa:
+    name: "hotpotqa/hotpot_qa"
+    config: "distractor"
+    enabled: true
+    sample_limit: 500
+    splits:
+      - "train"
+      - "validation"
+
+  ragbench:
+    name: "rungalileo/ragbench"
+    config: "hotpotqa"  # Options: covidqa, cuad, delucionqa, finqa, hagrid, hotpotqa, msmarco, pubmedqa, tatqa, techqa
+    enabled: true
+    sample_limit: 200
+    splits:
+      - "train"
+      - "validation"
+      - "test"
+
+  scifact:
+    name: "BeIR/scifact"
+    qrels_name: "BeIR/scifact-qrels"
+    config: "corpus"
+    queries_config: "queries"
+    enabled: true
+    sample_limit: 200
+    splits:
+      - "corpus"
+      - "queries"
+
+sampling:
+  seed: 42
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+storage:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  evaluation_dir: "data/evaluation"
+  logs_dir: "logs"
+
+network:
+  max_retries: 3
+  retry_delay: 2.0
+  timeout_seconds: 60

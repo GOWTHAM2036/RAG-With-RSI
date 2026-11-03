@@ -1,0 +1,52 @@
+{
+  "id": "bench-general-core",
+  "name": "EvoRAG General Knowledge & Technical Benchmark",
+  "description": "Standard golden QA set evaluating factual precision, synthesis, and hybrid retrieval across technical documents.",
+  "pairs": [
+    {
+      "id": "pair-001",
+      "query": "What is Retrieval-Augmented Generation?",
+      "ground_truth_contexts": [
+        "Retrieval-Augmented Generation blends neural generation with dense/sparse document retrieval to eliminate hallucinations."
+      ],
+      "ground_truth_answer": "Retrieval-Augmented Generation blends neural generation with dense or sparse document retrieval to ground LLM responses in external knowledge and reduce hallucinations.",
+      "category": "definition"
+    },
+    {
+      "id": "pair-002",
+      "query": "How does evolutionary optimization improve RAG pipelines?",
+      "ground_truth_contexts": [
+        "Evolutionary algorithms optimize hyperparameter combinations such as chunk size, overlap, top-k, and hybrid alpha by treating a RAG pipeline configuration as a chromosome."
+      ],
+      "ground_truth_answer": "Evolutionary algorithms optimize hyperparameter combinations like chunk size, overlap, top-k, and hybrid alpha by treating configurations as chromosomes and evaluating them against fitness benchmarks.",
+      "category": "optimization"
+    },
+    {
+      "id": "pair-003",
+      "query": "Why is Reciprocal Rank Fusion useful in hybrid search?",
+      "ground_truth_contexts": [
+        "Reciprocal Rank Fusion (RRF) normalizes disparate score distributions between vector and lexical retrievers."
+      ],
+      "ground_truth_answer": "RRF normalizes disparate score distributions between vector and lexical retrievers, enabling smooth ranking combination.",
+      "category": "hybrid_search"
+    },
+    {
+      "id": "pair-004",
+      "query": "What problem do dense vectors face with out-of-vocabulary terms?",
+      "ground_truth_contexts": [
+        "Dense vectors struggle with rare product SKUs, exact hashes, and brand identifiers. BM25 easily indexes and ranks these tokens."
+      ],
+      "ground_truth_answer": "Dense vectors struggle with rare product SKUs, exact hashes, and brand identifiers, whereas BM25 easily indexes and ranks exact tokens.",
+      "category": "retrieval_comparison"
+    },
+    {
+      "id": "pair-005",
+      "query": "What optimal alpha coefficient yields peak MRR in production benchmarks?",
+      "ground_truth_contexts": [
+        "In production benchmarks, an alpha between 0.6 and 0.7 yields peak Mean Reciprocal Rank (MRR)."
+      ],
+      "ground_truth_answer": "An alpha coefficient between 0.6 and 0.7 yields peak Mean Reciprocal Rank (MRR) in production benchmarks.",
+      "category": "hyperparameters"
+    }
+  ]
+}

@@ -1,0 +1,181 @@
+{
+  "timestamp": "1793714755.8061428",
+  "total_files_validated": 8,
+  "overall_records_examined": 5670,
+  "reports": [
+    {
+      "file": "data\\processed\\combined.jsonl",
+      "file_size_kb": 8103.6,
+      "total_records": 1800,
+      "valid_records": 1800,
+      "validity_percentage": 100.0,
+      "missing_questions": 0,
+      "missing_answers": 200,
+      "empty_contexts": 0,
+      "duplicate_ids": 0,
+      "invalid_json_or_records": 0,
+      "type_errors": 0,
+      "sources_breakdown": {
+        "hotpotqa": 1000,
+        "ragbench": 600,
+        "scifact": 200
+      },
+      "avg_question_words": 15.86,
+      "avg_context_documents": 6.97,
+      "avg_answer_words": 7.7,
+      "notes": []
+    },
+    {
+      "file": "data\\processed\\hotpotqa.jsonl",
+      "file_size_kb": 6106.08,
+      "total_records": 1000,
+      "valid_records": 1000,
+      "validity_percentage": 100.0,
+      "missing_questions": 0,
+      "missing_answers": 0,
+      "empty_contexts": 0,
+      "duplicate_ids": 0,
+      "invalid_json_or_records": 0,
+      "type_errors": 0,
+      "sources_breakdown": {
+        "hotpotqa": 1000
+      },
+      "avg_question_words": 16.89,
+      "avg_context_documents": 9.93,
+      "avg_answer_words": 2.26,
+      "notes": []
+    },
+    {
+      "file": "data\\processed\\ragbench.jsonl",
+      "file_size_kb": 1559.31,
+      "total_records": 600,
+      "valid_records": 600,
+      "validity_percentage": 100.0,
+      "missing_questions": 0,
+      "missing_answers": 0,
+      "empty_contexts": 0,
+      "duplicate_ids": 0,
+      "invalid_json_or_records": 0,
+      "type_errors": 0,
+      "sources_breakdown": {
+        "ragbench": 600
+      },
+      "avg_question_words": 15.47,
+      "avg_context_documents": 3.99,
+      "avg_answer_words": 19.33,
+      "notes": []
+    },
+    {
+      "file": "data\\processed\\scifact.jsonl",
+      "file_size_kb": 438.21,
+      "total_records": 200,
+      "valid_records": 200,
+      "validity_percentage": 100.0,
+      "missing_questions": 0,
+      "missing_answers": 200,
+      "empty_contexts": 0,
+      "duplicate_ids": 0,
+      "invalid_json_or_records": 0,
+      "type_errors": 0,
+      "sources_breakdown": {
+        "scifact": 200
+      },
+      "avg_question_words": 11.91,
+      "avg_context_documents": 1.12,
+      "avg_answer_words": 0.0,
+      "notes": [
+        "SciFact is a scientific document retrieval benchmark. Expected answers are intentionally empty (200 records) without fake fabrication."
+      ]
+    },
+    {
+      "file": "data\\evaluation\\test_blind.jsonl",
+      "file_size_kb": 1156.81,
+      "total_records": 270,
+      "valid_records": 270,
+      "validity_percentage": 100.0,
+      "missing_questions": 0,
+      "missing_answers": 270,
+      "empty_contexts": 0,
+      "duplicate_ids": 0,
+      "invalid_json_or_records": 0,
+      "type_errors": 0,
+      "sources_breakdown": {
+        "hotpotqa": 150,
+        "ragbench": 90,
+        "scifact": 30
+      },
+      "avg_question_words": 16.1,
+      "avg_context_documents": 6.97,
+      "avg_answer_words": 0.0,
+      "notes": [
+        "Blind test set: Expected answers are intentionally omitted to prevent data leakage during recursive self-improvement."
+      ]
+    },
+    {
+      "file": "data\\evaluation\\test_isolated.jsonl",
+      "file_size_kb": 1224.16,
+      "total_records": 270,
+      "valid_records": 270,
+      "validity_percentage": 100.0,
+      "missing_questions": 0,
+      "missing_answers": 30,
+      "empty_contexts": 0,
+      "duplicate_ids": 0,
+      "invalid_json_or_records": 0,
+      "type_errors": 0,
+      "sources_breakdown": {
+        "hotpotqa": 150,
+        "ragbench": 90,
+        "scifact": 30
+      },
+      "avg_question_words": 16.1,
+      "avg_context_documents": 6.97,
+      "avg_answer_words": 7.94,
+      "notes": []
+    },
+    {
+      "file": "data\\evaluation\\train.jsonl",
+      "file_size_kb": 5654.49,
+      "total_records": 1260,
+      "valid_records": 1260,
+      "validity_percentage": 100.0,
+      "missing_questions": 0,
+      "missing_answers": 140,
+      "empty_contexts": 0,
+      "duplicate_ids": 0,
+      "invalid_json_or_records": 0,
+      "type_errors": 0,
+      "sources_breakdown": {
+        "ragbench": 420,
+        "scifact": 140,
+        "hotpotqa": 700
+      },
+      "avg_question_words": 15.72,
+      "avg_context_documents": 6.97,
+      "avg_answer_words": 7.62,
+      "notes": []
+    },
+    {
+      "file": "data\\evaluation\\validation.jsonl",
+      "file_size_kb": 1224.95,
+      "total_records": 270,
+      "valid_records": 270,
+      "validity_percentage": 100.0,
+      "missing_questions": 0,
+      "missing_answers": 30,
+      "empty_contexts": 0,
+      "duplicate_ids": 0,
+      "invalid_json_or_records": 0,
+      "type_errors": 0,
+      "sources_breakdown": {
+        "hotpotqa": 150,
+        "ragbench": 90,
+        "scifact": 30
+      },
+      "avg_question_words": 16.31,
+      "avg_context_documents": 6.97,
+      "avg_answer_words": 7.83,
+      "notes": []
+    }
+  ]
+}
